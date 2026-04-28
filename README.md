@@ -188,7 +188,7 @@ qm9_000002
 
 #### Important name/SMILES alignment detail
 
-The code independently drops missing values from the SMILES column and, when present, the name column. It then truncates both lists to the same minimum length. If missing values occur in only one of these columns, row-level alignment may be lost. For publication use, provide input files with complete, row-aligned names and SMILES.
+The code independently drops missing values from the SMILES column and, when present, the name column. It then truncates both lists to the same minimum length. If missing values occur in only one of these columns, row-level alignment may be lost. Provide input files with complete, row-aligned names and SMILES.
 
 ---
 
@@ -436,8 +436,7 @@ Because missing descriptors are zero-filled, downstream users should decide whet
 
 ## Suggested repository layout
 
-The current script accepts explicit paths and does not require a fixed repository layout. For publication use, the following structure is recommended:
-
+The current script accepts explicit paths and does not require a fixed repository layout. 
 ```text
 .
 ├── README.md
@@ -703,7 +702,7 @@ The pipeline is designed to continue after molecule-level or backend-level failu
 - missing requested output columns are filled with `0.0`;
 - rerunning the script does not retry `-1` failed stages.
 
-For publication workflows, consider exporting the failure table from SQLite and reporting stage-level failure counts.
+Consider exporting the failure table from SQLite and reporting stage-level failure counts.
 
 Example SQLite query:
 
@@ -734,9 +733,8 @@ This makes the workflow useful for producing descriptor matrices under realistic
 
 ---
 
-## Publication-readiness recommendations
+## The repository
 
-The following additions are recommended before using the repository as a manuscript companion:
 
 | Addition | Purpose |
 | --- | --- |
