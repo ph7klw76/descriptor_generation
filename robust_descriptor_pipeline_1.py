@@ -37,7 +37,46 @@ ARCHITECTURE:
 INSTALL (Windows Anaconda Prompt):
     conda install -c conda-forge rdkit -y
     pip install mordred padelpy pandas openpyxl
-    # Java ≥ 8: https://adoptium.net/ (check "Add to PATH")
+    # Java >= 8: https://adoptium.net/ (check "Add to PATH")
+
+──────────────────────────────────────────────────────────────────────
+REPRODUCIBILITY — exact package versions to regenerate test.xlsx
+──────────────────────────────────────────────────────────────────────
+test.xlsx was produced by THIS pipeline. To reproduce its values you need
+BOTH the code fixes below AND the pinned dependency versions. Empirically
+verified by regenerating molecule 19-BBCz-DB (a fused boron MR-TADF
+emitter) and comparing column-by-column (see test_descriptor_generation_
+match.py and REQUIRED_VERSIONS below):
+
+  CODE (all already applied in this file):
+    • PaDEL must be restricted to the reference's descriptor groups
+      (run_pipeline(..., padel_restrict_to_ref=True)) — otherwise RingCount/
+      PubchemFingerprinter trigger CDK's AllRingsFinder timeout on fused
+      rings and the whole PaDEL stage fails → all PaDEL columns become 0.
+    • PaDEL is fed EXPLICIT-hydrogen structures (Chem.AddHs in the PaDEL
+      stage): the H-aware autocorrelation / information-content descriptors
+      are wrong without it.
+    • PaDEL maxruntime is in MILLISECONDS (max_runtime = timeout_per_mol *
+      1000); the old seconds value gave a ~45 ms budget that silently
+      truncated PaDEL output.
+
+  VERSIONS:
+    • mordred  == 1.2.0   (EXACT — reproduces every Mordred column bit-for-
+                           bit; works with numpy 2.x in this env)
+    • padelpy  == 0.1.13  (EXACT — bundles PaDEL-Descriptor 2.21 / CDK; the
+                           PaDEL columns/fingerprints match bit-for-bit)
+    • Java     >= 8       (any JRE/JDK 8+ on PATH; the descriptor conda env
+                           ships NO Java — install/point JAVA_HOME at one)
+    • python   == 3.10    (upstream-suggested; mordred 1.2.0 also runs 3.8/3.9)
+    • rdkit    <  2021.09  (the reference's RDKit. Versions 2021.09, 2022.03,
+                           2022.09 and 2026.03 ALL diverge from the reference
+                           on a handful of RDKit-stage descriptors — Chi3v,
+                           SlogP_VSA*, SMR_VSA*, FpDensityMorgan2/3 — so the
+                           reference used an OLDER build. Exact version is not
+                           pinned upstream; this is the only axis that blocks
+                           100% reproduction. With rdkit 2026.03.1 the match
+                           is 116/126 = 92.1%, fingerprints 38/38 exact, and
+                           the 10 residuals are exactly these RDKit-stage cols.)
 
 USAGE IN SPYDER:
     Edit the paths at the bottom of this file, press F5.
@@ -98,6 +137,76 @@ def setup_logging(log_file: str = "descriptor_pipeline.log"):
     root.addHandler(fh)
 
     return logging.getLogger("pipeline")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  0. REPRODUCIBILITY — pinned dependency versions for test.xlsx
+# ═══════════════════════════════════════════════════════════════════
+# Versions that reproduce the reference workbook (see module docstring).
+# "exact" entries match the reference bit-for-bit; rdkit is the one axis
+# that does NOT (any tested 2021.09..2026.03 diverges on ~6 RDKit-stage
+# descriptors), so it is recorded as a maximum-exclusive bound.
+REQUIRED_VERSIONS = {
+    "mordred":  {"exact": "1.2.0"},
+    "padelpy":  {"exact": "0.1.13"},
+    # reference RDKit predates 2021.09; newer ones differ on Chi3v,
+    # SlogP_VSA*, SMR_VSA*, FpDensityMorgan2/3 only. (NOTE: pre-2021.09 rdkit
+    # wheels are built against numpy<2 — pin numpy<2 if you install one.)
+    "rdkit":    {"max_exclusive": "2021.09"},
+}
+
+
+def _version_tuple(v: str):
+    out = []
+    for part in str(v).split("."):
+        num = "".join(ch for ch in part if ch.isdigit())
+        out.append(int(num) if num else 0)
+    return tuple(out)
+
+
+def check_reproducibility_versions(logger=None):
+    """Log detected versions of the reproducibility-critical packages and
+    warn (never raise) when they differ from what produced test.xlsx.
+
+    Returns a dict {package: (detected_version, ok_bool)}.
+    """
+    def _emit(msg, warn=False):
+        if logger is not None:
+            (logger.warning if warn else logger.info)(msg)
+        else:
+            print(("[warn] " if warn else "") + msg)
+
+    results = {}
+    for pkg, spec in REQUIRED_VERSIONS.items():
+        try:
+            mod = __import__(pkg)
+            detected = getattr(mod, "__version__", "?")
+        except Exception:
+            detected = None
+
+        ok = True
+        if detected is None:
+            ok = False
+            _emit(f"[versions] {pkg}: NOT INSTALLED — required {spec}", warn=True)
+        elif "exact" in spec and detected != spec["exact"]:
+            ok = False
+            _emit(f"[versions] {pkg} {detected} != required {spec['exact']} "
+                  f"(values may not reproduce test.xlsx)", warn=True)
+        elif ("max_exclusive" in spec
+              and _version_tuple(detected) >= _version_tuple(spec["max_exclusive"])):
+            ok = False
+            _emit(f"[versions] {pkg} {detected} >= {spec['max_exclusive']} — "
+                  f"reference used an older build; a few descriptors may differ",
+                  warn=True)
+        else:
+            _emit(f"[versions] {pkg} {detected} OK")
+        results[pkg] = (detected, ok)
+
+    # Java is needed by PaDEL but has no Python __version__; just flag presence.
+    if shutil.which("java") is None and not os.environ.get("JAVA_HOME"):
+        _emit("[versions] java: not found on PATH and JAVA_HOME unset — "
+              "the PaDEL stage will fail (install a JRE/JDK >= 8)", warn=True)
+    return results
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -621,6 +730,11 @@ def _compute_padel_batch(smiles_names: List[Tuple[str, str]],
         for smi, name in smiles_names:
             mol = Chem.MolFromSmiles(smi)
             if mol is not None:
+                # Feed PaDEL the EXPLICIT-hydrogen structure: the property- and
+                # charge-weighted 2D autocorrelations (ATSC*/AATS*/GATS*/MATS*)
+                # and information-content descriptors are H-aware, so the
+                # reference workbook was built from H-added structures.
+                mol = Chem.AddHs(mol)
                 mol.SetProp("_Name", name)
                 writer.write(mol)
                 valid_names.append(name)
@@ -629,7 +743,12 @@ def _compute_padel_batch(smiles_names: List[Tuple[str, str]],
         if not valid_names:
             return {}
 
-        max_runtime = timeout_per_mol * len(valid_names)
+        # PaDEL's maxruntime is PER-MOLECULE and in MILLISECONDS; timeout_per_mol
+        # is in seconds. Without the ×1000 conversion PaDEL gets a few-millisecond
+        # budget and silently truncates its output after the first descriptor
+        # block (e.g. Autocorrelation survives but BCUT/InformationContent/
+        # fingerprints are dropped), which then fall back to Mordred/zeros.
+        max_runtime = timeout_per_mol * 1000
 
         padeldescriptor(
             mol_dir=sdf_path,
@@ -697,6 +816,9 @@ def _compute_padel_single_fallback(smiles: str,
         csv_path = os.path.join(tmpdir, "single.csv")
         xml_path = _build_padel_descriptor_xml(enabled_groups=enabled_groups)
 
+        # explicit hydrogens (see _compute_padel_batch) so H-aware descriptors
+        # match the reference workbook
+        mol = Chem.AddHs(mol)
         mol.SetProp("_Name", "mol")
         writer = Chem.SDWriter(sdf_path)
         writer.write(mol)
@@ -1104,7 +1226,9 @@ def run_pipeline(
     skip_mordred: bool = False,
     skip_rdkit: bool = False,
     skip_padel: bool = False,
-    padel_restrict_to_ref: bool = False,
+    padel_restrict_to_ref: bool = True,   # required to reproduce test.xlsx and
+                                          # to avoid CDK AllRingsFinder timeouts
+                                          # on heavily fused rings (see docstring)
     export_interval: int = 5000,
 ):
     """
@@ -1147,6 +1271,10 @@ def run_pipeline(
     logger.info(f"  Output:        {output_csv}")
     logger.info(f"  Checkpoint DB: {checkpoint_db}")
     logger.info(f"  Max molecules: {max_molecules or 'ALL'}")
+    logger.info("")
+
+    # ── Reproducibility version check (warns only; see REQUIRED_VERSIONS) ──
+    check_reproducibility_versions(logger)
     logger.info("")
 
     # ── Load reference columns ──
@@ -1298,11 +1426,17 @@ if __name__ == "__main__":
         parser.add_argument("--skip-mordred", action="store_true")
         parser.add_argument("--skip-rdkit", action="store_true")
         parser.add_argument("--skip-padel", action="store_true")
-        parser.add_argument("--padel-restrict-to-ref", action="store_true",
+        parser.add_argument("--padel-restrict-to-ref", dest="padel_restrict_to_ref",
+                            action="store_true", default=True,
                             help="Auto-discover and enable only the PaDEL "
                                  "descriptor groups whose outputs appear in "
                                  "the reference xlsx. Big speedup on large "
-                                 "molecules; first run probes ~55 groups (~1 min).")
+                                 "molecules; first run probes ~55 groups (~1 min). "
+                                 "ON by default (required to reproduce test.xlsx).")
+        parser.add_argument("--no-padel-restrict-to-ref", dest="padel_restrict_to_ref",
+                            action="store_false",
+                            help="Run ALL PaDEL 2D groups (will time out / fail "
+                                 "on heavily fused rings via CDK AllRingsFinder).")
         args = parser.parse_args()
 
         run_pipeline(
